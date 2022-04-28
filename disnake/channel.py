@@ -52,14 +52,7 @@ import disnake.abc
 from . import utils
 from .asset import Asset
 from .context_managers import Typing
-from .enums import (
-    ChannelType,
-    StagePrivacyLevel,
-    VideoQualityMode,
-    VoiceRegion,
-    try_enum,
-    try_enum_to_int,
-)
+from .enums import ChannelType, StagePrivacyLevel, VideoQualityMode, try_enum, try_enum_to_int
 from .errors import ClientException, InvalidArgument
 from .file import File
 from .iterators import ArchivedThreadIterator
@@ -106,6 +99,7 @@ if TYPE_CHECKING:
     from .ui.action_row import Components
     from .ui.view import View
     from .user import BaseUser, ClientUser, User
+    from .voice_region import VoiceRegion
     from .webhook import Webhook
 
 
@@ -951,9 +945,7 @@ class VocalGuildChannel(disnake.abc.Connectable, disnake.abc.GuildChannel, Hasha
         self.guild = guild
         self.name: str = data["name"]
         rtc = data.get("rtc_region")
-        self.rtc_region: Optional[VoiceRegion] = (
-            try_enum(VoiceRegion, rtc) if rtc is not None else None
-        )
+        self.rtc_region: Optional[str] = rtc
         self.video_quality_mode: VideoQualityMode = try_enum(
             VideoQualityMode, data.get("video_quality_mode", 1)
         )
@@ -1003,24 +995,6 @@ class VocalGuildChannel(disnake.abc.Connectable, disnake.abc.GuildChannel, Hasha
         }
         # fmt: on
 
-    @utils.copy_doc(disnake.abc.GuildChannel.permissions_for)
-    def permissions_for(
-        self,
-        obj: Union[Member, Role],
-        /,
-        *,
-        ignore_timeout: bool = MISSING,
-    ) -> Permissions:
-        base = super().permissions_for(obj, ignore_timeout=ignore_timeout)
-
-        # voice channels cannot be edited by people who can't connect to them
-        # It also implicitly denies all other voice perms
-        if not base.connect:
-            denied = Permissions.voice()
-            denied.update(manage_channels=True, manage_roles=True)
-            base.value &= ~denied.value
-        return base
-
 
 class VoiceChannel(disnake.abc.Messageable, VocalGuildChannel):
     """Represents a Discord guild voice channel.
@@ -1060,11 +1034,14 @@ class VoiceChannel(disnake.abc.Messageable, VocalGuildChannel):
         The channel's preferred audio bitrate in bits per second.
     user_limit: :class:`int`
         The channel's limit for number of members that can be in a voice channel.
-    rtc_region: Optional[:class:`VoiceRegion`]
+    rtc_region: Optional[:class:`str`]
         The region for the voice channel's voice communication.
         A value of ``None`` indicates automatic voice region detection.
 
         .. versionadded:: 1.7
+
+        .. versionchanged:: 2.5
+            No longer a ``VoiceRegion`` instance.
 
     video_quality_mode: :class:`VideoQualityMode`
         The camera video quality for the voice channel's participants.
@@ -1189,6 +1166,26 @@ class VoiceChannel(disnake.abc.Messageable, VocalGuildChannel):
 
         return PartialMessage(channel=self, id=message_id)
 
+    @utils.copy_doc(disnake.abc.GuildChannel.permissions_for)
+    def permissions_for(
+        self,
+        obj: Union[Member, Role],
+        /,
+        *,
+        ignore_timeout: bool = MISSING,
+    ) -> Permissions:
+        base = super().permissions_for(obj, ignore_timeout=ignore_timeout)
+
+        # voice channels cannot be edited by people who can't connect to them
+        # It also implicitly denies all other voice perms
+        if not base.connect:
+            denied = Permissions.voice()
+            # voice channels also deny all text related permissions
+            denied.value |= Permissions.text().value
+            denied.update(manage_channels=True, manage_roles=True)
+            base.value &= ~denied.value
+        return base
+
     @overload
     async def edit(
         self,
@@ -1200,7 +1197,7 @@ class VoiceChannel(disnake.abc.Messageable, VocalGuildChannel):
         sync_permissions: int = ...,
         category: Optional[CategoryChannel] = ...,
         overwrites: Mapping[Union[Role, Member], PermissionOverwrite] = ...,
-        rtc_region: Optional[VoiceRegion] = ...,
+        rtc_region: Optional[Union[str, VoiceRegion]] = ...,
         video_quality_mode: VideoQualityMode = ...,
         nsfw: bool = ...,
         slowmode_delay: int = ...,
@@ -1247,7 +1244,7 @@ class VoiceChannel(disnake.abc.Messageable, VocalGuildChannel):
         overwrites: :class:`Mapping`
             A :class:`Mapping` of target (either a role or a member) to
             :class:`PermissionOverwrite` to apply to the channel.
-        rtc_region: Optional[:class:`VoiceRegion`]
+        rtc_region: Optional[Union[:class:`str`, :class:`VoiceRegion`]]
             The new region for the voice channel's voice communication.
             A value of ``None`` indicates automatic voice region detection.
 
@@ -1288,6 +1285,237 @@ class VoiceChannel(disnake.abc.Messageable, VocalGuildChannel):
         if payload is not None:
             # the payload will always be the proper channel payload
             return self.__class__(state=self._state, guild=self.guild, data=payload)  # type: ignore
+
+    async def delete_messages(self, messages: Iterable[Snowflake]) -> None:
+        """|coro|
+
+        Deletes a list of messages. This is similar to :meth:`Message.delete`
+        except it bulk deletes multiple messages.
+
+        As a special case, if the number of messages is 0, then nothing
+        is done. If the number of messages is 1 then single message
+        delete is done. If it's more than two, then bulk delete is used.
+
+        You cannot bulk delete more than 100 messages or messages that
+        are older than 14 days.
+
+        You must have :attr:`~Permissions.manage_messages` permission to
+        do this.
+
+        .. versionadded:: 2.5
+
+        Parameters
+        ----------
+        messages: Iterable[:class:`abc.Snowflake`]
+            An iterable of messages denoting which ones to bulk delete.
+
+        Raises
+        ------
+        ClientException
+            The number of messages to delete was more than 100.
+        Forbidden
+            You do not have proper permissions to delete the messages.
+        NotFound
+            If single delete, then the message was already deleted.
+        HTTPException
+            Deleting the messages failed.
+        """
+        if not isinstance(messages, (list, tuple)):
+            messages = list(messages)
+
+        if len(messages) == 0:
+            return  # do nothing
+
+        if len(messages) == 1:
+            message_id: int = messages[0].id
+            await self._state.http.delete_message(self.id, message_id)
+            return
+
+        if len(messages) > 100:
+            raise ClientException("Can only bulk delete messages up to 100 messages")
+
+        message_ids: SnowflakeList = [m.id for m in messages]
+        await self._state.http.delete_messages(self.id, message_ids)
+
+    async def purge(
+        self,
+        *,
+        limit: Optional[int] = 100,
+        check: Callable[[Message], bool] = MISSING,
+        before: Optional[SnowflakeTime] = None,
+        after: Optional[SnowflakeTime] = None,
+        around: Optional[SnowflakeTime] = None,
+        oldest_first: Optional[bool] = False,
+        bulk: bool = True,
+    ) -> List[Message]:
+        """|coro|
+
+        Purges a list of messages that meet the criteria given by the predicate
+        ``check``. If a ``check`` is not provided then all messages are deleted
+        without discrimination.
+
+        You must have :attr:`~Permissions.manage_messages` permission to
+        delete messages even if they are your own.
+        :attr:`~Permissions.read_message_history` permission is
+        also needed to retrieve message history.
+
+        .. versionadded:: 2.5
+
+        .. note::
+
+            See :meth:`TextChannel.purge` for examples.
+
+        Parameters
+        ----------
+        limit: Optional[:class:`int`]
+            The number of messages to search through. This is not the number
+            of messages that will be deleted, though it can be.
+        check: Callable[[:class:`Message`], :class:`bool`]
+            The function used to check if a message should be deleted.
+            It must take a :class:`Message` as its sole parameter.
+        before: Optional[Union[:class:`abc.Snowflake`, :class:`datetime.datetime`]]
+            Same as ``before`` in :meth:`history`.
+        after: Optional[Union[:class:`abc.Snowflake`, :class:`datetime.datetime`]]
+            Same as ``after`` in :meth:`history`.
+        around: Optional[Union[:class:`abc.Snowflake`, :class:`datetime.datetime`]]
+            Same as ``around`` in :meth:`history`.
+        oldest_first: Optional[:class:`bool`]
+            Same as ``oldest_first`` in :meth:`history`.
+        bulk: :class:`bool`
+            If ``True``, use bulk delete. Setting this to ``False`` is useful for mass-deleting
+            a bot's own messages without :attr:`Permissions.manage_messages`. When ``True``, will
+            fall back to single delete if messages are older than two weeks.
+
+        Raises
+        ------
+        Forbidden
+            You do not have proper permissions to do the actions required.
+        HTTPException
+            Purging the messages failed.
+
+        Returns
+        -------
+        List[:class:`.Message`]
+            A list of messages that were deleted.
+        """
+        if check is MISSING:
+            check = lambda m: True
+
+        iterator = self.history(
+            limit=limit, before=before, after=after, oldest_first=oldest_first, around=around
+        )
+        ret: List[Message] = []
+        count = 0
+
+        minimum_time = int((time.time() - 14 * 24 * 60 * 60) * 1000.0 - 1420070400000) << 22
+        strategy = self.delete_messages if bulk else _single_delete_strategy
+
+        async for message in iterator:
+            if count == 100:
+                to_delete = ret[-100:]
+                await strategy(to_delete)
+                count = 0
+                await asyncio.sleep(1)
+
+            if not check(message):
+                continue
+
+            if message.id < minimum_time:
+                # older than 14 days old
+                if count == 1:
+                    await ret[-1].delete()
+                elif count >= 2:
+                    to_delete = ret[-count:]
+                    await strategy(to_delete)
+
+                count = 0
+                strategy = _single_delete_strategy
+
+            count += 1
+            ret.append(message)
+
+        # SOme messages remaining to poll
+        if count >= 2:
+            # more than 2 messages -> bulk delete
+            to_delete = ret[-count:]
+            await strategy(to_delete)
+        elif count == 1:
+            # delete a single message
+            await ret[-1].delete()
+
+        return ret
+
+    async def webhooks(self) -> List[Webhook]:
+        """|coro|
+
+        Retrieves the list of webhooks this channel has.
+
+        You must have :attr:`~.Permissions.manage_webhooks` permission to
+        use this.
+
+        .. versionadded:: 2.5
+
+        Raises
+        ------
+        Forbidden
+            You don't have permissions to get the webhooks.
+
+        Returns
+        -------
+        List[:class:`Webhook`]
+            The list of webhooks this channel has.
+        """
+        from .webhook import Webhook
+
+        data = await self._state.http.channel_webhooks(self.id)
+        return [Webhook.from_state(d, state=self._state) for d in data]
+
+    async def create_webhook(
+        self, *, name: str, avatar: Optional[bytes] = None, reason: Optional[str] = None
+    ) -> Webhook:
+        """|coro|
+
+        Creates a webhook for this channel.
+
+        You must have :attr:`~.Permissions.manage_webhooks` permission to
+        do this.
+
+        .. versionadded:: 2.5
+
+        Parameters
+        ----------
+        name: :class:`str`
+            The webhook's name.
+        avatar: Optional[:class:`bytes`]
+            The webhook's default avatar.
+            This operates similarly to :meth:`~ClientUser.edit`.
+        reason: Optional[:class:`str`]
+            The reason for creating this webhook. Shows up in the audit logs.
+
+        Raises
+        ------
+        NotFound
+            The ``avatar`` asset couldn't be found.
+        Forbidden
+            You do not have permissions to create a webhook.
+        HTTPException
+            Creating the webhook failed.
+        TypeError
+            The ``avatar`` asset is a lottie sticker (see :func:`Sticker.read`).
+
+        Returns
+        -------
+        :class:`Webhook`
+            The newly created webhook.
+        """
+        from .webhook import Webhook
+
+        avatar_data = await utils._assetbytes_to_base64_data(avatar)
+
+        data = await self._state.http.create_webhook(
+            self.id, name=str(name), avatar=avatar_data, reason=reason
+        )
+        return Webhook.from_state(data, state=self._state)
 
 
 class StageChannel(VocalGuildChannel):
@@ -1332,9 +1560,13 @@ class StageChannel(VocalGuildChannel):
         The channel's preferred audio bitrate in bits per second.
     user_limit: :class:`int`
         The channel's limit for number of members that can be in a stage channel.
-    rtc_region: Optional[:class:`VoiceRegion`]
+    rtc_region: Optional[:class:`str`]
         The region for the stage channel's voice communication.
         A value of ``None`` indicates automatic voice region detection.
+
+        .. versionchanged:: 2.5
+            No longer a ``VoiceRegion`` instance.
+
     video_quality_mode: :class:`VideoQualityMode`
         The camera video quality for the stage channel's participants.
 
@@ -1424,6 +1656,24 @@ class StageChannel(VocalGuildChannel):
         .. versionadded:: 2.0
         """
         return utils.get(self.guild.stage_instances, channel_id=self.id)
+
+    @utils.copy_doc(disnake.abc.GuildChannel.permissions_for)
+    def permissions_for(
+        self,
+        obj: Union[Member, Role],
+        /,
+        *,
+        ignore_timeout: bool = MISSING,
+    ) -> Permissions:
+        base = super().permissions_for(obj, ignore_timeout=ignore_timeout)
+
+        # voice channels cannot be edited by people who can't connect to them
+        # It also implicitly denies all other voice perms
+        if not base.connect:
+            denied = Permissions.voice()
+            denied.update(manage_channels=True, manage_roles=True)
+            base.value &= ~denied.value
+        return base
 
     async def create_instance(
         self,
@@ -1523,7 +1773,7 @@ class StageChannel(VocalGuildChannel):
         sync_permissions: int = ...,
         category: Optional[CategoryChannel] = ...,
         overwrites: Mapping[Union[Role, Member], PermissionOverwrite] = ...,
-        rtc_region: Optional[VoiceRegion] = ...,
+        rtc_region: Optional[Union[str, VoiceRegion]] = ...,
         video_quality_mode: VideoQualityMode = ...,
         reason: Optional[str] = ...,
     ) -> Optional[StageChannel]:
@@ -1562,7 +1812,7 @@ class StageChannel(VocalGuildChannel):
         overwrites: :class:`Mapping`
             A :class:`Mapping` of target (either a role or a member) to
             :class:`PermissionOverwrite` to apply to the channel.
-        rtc_region: Optional[:class:`VoiceRegion`]
+        rtc_region: Optional[Union[:class:`str`, :class:`VoiceRegion`]]
             The new region for the stage channel's voice communication.
             A value of ``None`` indicates automatic voice region detection.
         video_quality_mode: :class:`VideoQualityMode`
@@ -2182,7 +2432,7 @@ class ForumChannel(disnake.abc.GuildChannel, Hashable):
 
         Creates a thread in this forum channel.
 
-        You must have the :attr:`~Permissions.send_messages` permission to do this.
+        You must have the :attr:`~Permissions.create_forum_threads` permission to do this.
 
         Parameters
         ----------

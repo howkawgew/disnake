@@ -1886,55 +1886,6 @@ of :class:`enum.Enum`.
         An alias for :attr:`paragraph`.
 
 
-.. class:: VoiceRegion
-
-    Specifies the region a voice server belongs to.
-
-    .. attribute:: brazil
-
-        The Brazil region.
-    .. attribute:: hongkong
-
-        The Hong Kong region.
-    .. attribute:: india
-
-        The India region.
-
-        .. versionadded:: 1.2
-
-    .. attribute:: japan
-
-        The Japan region.
-    .. attribute:: rotterdam
-
-        The Rotterdam region.
-
-        .. versionadded:: 2.5
-    .. attribute:: russia
-
-        The Russia region.
-    .. attribute:: singapore
-
-        The Singapore region.
-    .. attribute:: southafrica
-
-        The South Africa region.
-    .. attribute:: sydney
-
-        The Sydney region.
-    .. attribute:: us_central
-
-        The US Central region.
-    .. attribute:: us_east
-
-        The US East region.
-    .. attribute:: us_south
-
-        The US South region.
-    .. attribute:: us_west
-
-        The US West region.
-
 .. class:: VerificationLevel
 
     Specifies a :class:`Guild`\'s verification level, which is the criteria in
@@ -3498,7 +3449,7 @@ AuditLogDiff
 
         The guild's voice region. See also :attr:`Guild.region`.
 
-        :type: :class:`VoiceRegion`
+        :type: :class:`str`
 
     .. attribute:: afk_channel
 
@@ -3824,7 +3775,7 @@ AuditLogDiff
 
         See also :attr:`VoiceChannel.rtc_region`.
 
-        :type: :class:`VoiceRegion`
+        :type: :class:`str`
 
     .. attribute:: video_quality_mode
 
@@ -4766,6 +4717,29 @@ Widget
 .. attributetable:: Widget
 
 .. autoclass:: Widget()
+    :members:
+
+WelcomeScreen
+~~~~~~~~~~~~~~
+
+.. attributetable:: WelcomeScreen
+
+.. autoclass:: WelcomeScreen()
+    :members:
+
+WelcomeScreenChannel
+~~~~~~~~~~~~~~~~~~~~~
+
+.. attributetable:: WelcomeScreenChannel
+
+.. autoclass:: WelcomeScreenChannel()
+
+VoiceRegion
+~~~~~~~~~~~
+
+.. attributetable:: VoiceRegion
+
+.. autoclass:: VoiceRegion()
     :members:
 
 StickerPack
